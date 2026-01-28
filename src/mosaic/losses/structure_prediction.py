@@ -233,7 +233,7 @@ class BinderTargetContact(LossTerm):
             bins=output.distogram_bins,
         )
         if self.epitope_idx is not None:
-            log_contact_inter = log_contact_inter[:, self.epitope_idx]
+            log_contact_inter = log_contact_inter[:, jnp.array(self.epitope_idx)]
 
         # see above note about JAX/XLO issue with top_k inside vmap
         # binder_target_max_p = jax.vmap(lambda v: jax.lax.top_k(v, 3)[0])(
@@ -244,7 +244,7 @@ class BinderTargetContact(LossTerm):
 
         # log probability of contacting target for each position in binder
         if self.paratope_idx is not None:
-            binder_target_max_p = binder_target_max_p[self.paratope_idx]
+            binder_target_max_p = binder_target_max_p[jnp.array(self.paratope_idx)]
         if self.paratope_size is not None:
             binder_target_max_p = jax.lax.top_k(
                 binder_target_max_p, self.paratope_size

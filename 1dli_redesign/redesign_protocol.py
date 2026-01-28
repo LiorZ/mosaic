@@ -3,10 +3,16 @@ import marimo
 __generated_with = "0.19.6"
 app = marimo.App(width="full")
 
-
-# Cell 0: Imports
 with app.setup:
+    # GPU memory settings - must be before importing JAX
+    import os
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.99"
+    os.environ['TF_GPU_ALLOCATOR']='cuda_malloc_async'
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # Uncomment to use GPU 1 only
+
     import jax
+    jax.config.update("jax_default_matmul_precision", "bfloat16")
     import jax.numpy as jnp
     import marimo as mo
     import numpy as np
@@ -26,7 +32,6 @@ with app.setup:
     from mosaic.notebook_utils import pdb_viewer
 
 
-# Cell 1: Define sequences and variable positions
 @app.cell
 def _():
     PROTEIN_SEQUENCE = (
@@ -48,19 +53,17 @@ def _():
         f"**Fixed positions**: {402 - n_variable}  \n"
         f"**CYS260 check**: position 259 is '{wildtype_with_x[259]}'"
     )
-    return PROTEIN_SEQUENCE, wildtype_with_x, n_variable
+    return PROTEIN_SEQUENCE, n_variable, wildtype_with_x
 
 
-# Cell 2: Load models
 @app.cell
 def _():
     boltz2 = Boltz2()
     esmc = load_esmc("esmc_300m")
     stability_loss = StabilityModel.from_pretrained(esmc)
-    return boltz2, esmc, stability_loss
+    return boltz2, stability_loss
 
 
-# Cell 3: Convert template PDB to CIF
 @app.cell
 def _():
     pdb_path = Path(__file__).parent / "1dli_g1p.pdb"
@@ -96,39 +99,41 @@ def _():
     doc.write_file(template_cif_file.name)
 
     mo.md(f"Template CIF written to `{template_cif_file.name}`")
-    return template_cif_file
+    return (template_cif_file,)
 
 
-# Cell 4: Construct YAML and generate features
 @app.cell
 def _(PROTEIN_SEQUENCE, template_cif_file):
-    yaml_str = f"""version: 1
-sequences:
-  - protein:
-      id: [A]
-      sequence: {PROTEIN_SEQUENCE}
-      msa: empty
-  - ligand:
-      id: [B]
-      ccd: NAD
-  - ligand:
-      id: [C]
-      ccd: G1P
-templates:
-  - cif: {template_cif_file.name}
-    chain_id: [A]
-    template_id: [A]
-"""
+    import yaml as _yaml
+
+    # Build YAML as a dict to avoid formatting issues
+    yaml_dict = {
+        "version": 1,
+        "sequences": [
+            {"protein": {"id": ["A"], "sequence": PROTEIN_SEQUENCE, "msa": "empty"}},
+            {"ligand": {"id": ["B"], "ccd": "NAD"}},
+            {"ligand": {"id": ["C"], "ccd": "G1P"}},
+        ],
+        "templates": [
+            {
+                "cif": template_cif_file.name,
+                "chain_id": ["A"],
+                "template_id": ["A"],
+            }
+        ],
+    }
+    yaml_str = _yaml.dump(yaml_dict, default_flow_style=False, sort_keys=False)
+    print("Generated YAML:")
+    print(yaml_str)
 
     features, writer = load_features_and_structure_writer(yaml_str)
 
     template_mask_sum = np.sum(np.array(features["template_mask"]))
     mo.md(f"**Template mask sum**: {template_mask_sum} (should be > 0)")
     assert template_mask_sum > 0, "Template mask is all zeros — CIF may be malformed"
-    return features, writer, yaml_str
+    return features, writer
 
 
-# Cell 5: Identify ligand token indices
 @app.cell
 def _(features):
     asym_id = np.array(features["asym_id"]).squeeze()
@@ -153,10 +158,9 @@ def _(features):
         f"**NAD token indices** (relative to target): {nad_idx}  \n"
         f"**G1P token indices** (relative to target): {g1p_idx}"
     )
-    return nad_idx, g1p_idx, protein_len
+    return g1p_idx, nad_idx
 
 
-# Cell 6: Get wildtype distogram
 @app.cell
 def _(PROTEIN_SEQUENCE, boltz2, features):
     wt_pssm = jax.nn.one_hot(
@@ -170,17 +174,17 @@ def _(PROTEIN_SEQUENCE, boltz2, features):
         key=jax.random.key(42),
     )
 
-    wt_distogram_probs = jax.nn.softmax(wt_output.distogram_logits)
+    # Slice to protein-only (402x402) since DistogramCE compares against binder_len
+    wt_distogram_probs = jax.nn.softmax(wt_output.distogram_logits)[:402, :402]
     wt_plddt = wt_output.plddt
 
     mo.md(
         f"**Wildtype mean pLDDT**: {float(wt_plddt[:402].mean()):.3f}  \n"
         f"**Distogram shape**: {wt_distogram_probs.shape}"
     )
-    return wt_distogram_probs, wt_output, wt_plddt
+    return (wt_distogram_probs,)
 
 
-# Cell 7: Visualize wildtype prediction
 @app.cell
 def _(PROTEIN_SEQUENCE, boltz2, features, writer):
     wt_pred = boltz2.predict(
@@ -194,10 +198,9 @@ def _(PROTEIN_SEQUENCE, boltz2, features, writer):
     )
     mo.md(f"**Wildtype iPTM**: {float(wt_pred.iptm):.3f}")
     pdb_viewer(wt_pred.st)
-    return (wt_pred,)
+    return
 
 
-# Cell 8: Define composite loss
 @app.cell
 def _(
     boltz2,
@@ -205,9 +208,15 @@ def _(
     g1p_idx,
     nad_idx,
     stability_loss,
-    wt_distogram_probs,
     wildtype_with_x,
+    wt_distogram_probs,
 ):
+    # Convert indices to numpy arrays for JAX compatibility
+    nad_idx_arr = np.array(nad_idx)
+    g1p_idx_arr = np.array(g1p_idx)
+    nad_lobe_idx = np.arange(0, 228)
+    g1p_lobe_idx = np.arange(228, 402)
+
     inner_loss = (
         # Confidence
         1.0 * sp.PLDDTLoss()
@@ -217,15 +226,15 @@ def _(
         # NAD binding (fixed lobe maintains NAD contacts)
         + 1.0
         * sp.BinderTargetContact(
-            epitope_idx=nad_idx,
-            paratope_idx=list(range(0, 228)),
+            epitope_idx=nad_idx_arr,
+            paratope_idx=nad_lobe_idx,
             contact_distance=12.0,
         )
         # G1P binding (redesigned lobe must bind G1P)
         + 2.0
         * sp.BinderTargetContact(
-            epitope_idx=g1p_idx,
-            paratope_idx=list(range(228, 402)),
+            epitope_idx=g1p_idx_arr,
+            paratope_idx=g1p_lobe_idx,
             contact_distance=12.0,
         )
         # Interface PAE
@@ -244,7 +253,7 @@ def _(
         loss=inner_loss,
         features=features,
         recycling_steps=1,
-        sampling_steps=25,
+        sampling_steps=25
     )
 
     # Stability loss (sequence-level, no structure prediction needed)
@@ -254,10 +263,11 @@ def _(
     design_loss = SetPositions.from_sequence(
         wildtype_with_x, boltz_loss + 0.5 * stability_term
     )
-    return design_loss, boltz_loss
+
+    jax.clear_caches()
+    return (design_loss,)
 
 
-# Cell 9: Phase 1 — continuous optimization (APGM)
 @app.cell
 def _(design_loss, n_variable):
     _, PSSM_soft = simplex_APGM(
@@ -272,12 +282,11 @@ def _(design_loss, n_variable):
         n_steps=100,
         stepsize=0.1,
         momentum=0.0,
-        serial_evaluation=True,
+        serial_evaluation=False,
     )
     return (PSSM_soft,)
 
 
-# Cell 10: Phase 2 — sharpen to discrete
 @app.cell
 def _(PSSM_soft, design_loss):
     PSSM_sharp, _ = simplex_APGM(
@@ -286,7 +295,7 @@ def _(PSSM_soft, design_loss):
         x=PSSM_soft,
         stepsize=0.2,
         scale=1.1,
-        serial_evaluation=True,
+        serial_evaluation=False,
     )
     PSSM_sharp, _ = simplex_APGM(
         loss_function=design_loss,
@@ -294,12 +303,11 @@ def _(PSSM_soft, design_loss):
         x=PSSM_sharp,
         stepsize=0.2,
         scale=1.5,
-        serial_evaluation=True,
+        serial_evaluation=False,
     )
     return (PSSM_sharp,)
 
 
-# Cell 11: Recover full sequence
 @app.cell
 def _(PSSM_sharp, design_loss):
     full_pssm = design_loss.sequence(PSSM_sharp)
@@ -307,10 +315,9 @@ def _(PSSM_sharp, design_loss):
     designed_sequence = "".join([TOKENS[int(i)] for i in designed_tokens])
 
     mo.md(f"**Designed sequence** ({len(designed_sequence)} residues):\n\n`{designed_sequence}`")
-    return full_pssm, designed_sequence, designed_tokens
+    return designed_sequence, designed_tokens, full_pssm
 
 
-# Cell 12: Predict and visualize designed structure
 @app.cell
 def _(boltz2, features, full_pssm, writer):
     designed_pred = boltz2.predict(
@@ -328,7 +335,6 @@ def _(boltz2, features, full_pssm, writer):
     return (designed_pred,)
 
 
-# Cell 13: Diagnostic plots
 @app.cell
 def _(designed_pred, full_pssm):
     fig_pae = plt.figure(dpi=125)
@@ -354,7 +360,6 @@ def _(designed_pred, full_pssm):
     return
 
 
-# Cell 14: MCMC refinement
 @app.cell
 def _(design_loss, designed_tokens):
     seq_mcmc = gradient_MCMC(
@@ -364,12 +369,11 @@ def _(design_loss, designed_tokens):
         proposal_temp=0.00001,
         steps=50,
         fix_loss_key=False,
-        serial_evaluation=True,
+        serial_evaluation=False,
     )
     return (seq_mcmc,)
 
 
-# Cell 15: Predict MCMC result
 @app.cell
 def _(boltz2, design_loss, features, seq_mcmc, writer):
     mcmc_full_pssm = design_loss.sequence(jax.nn.one_hot(seq_mcmc, 20))
@@ -385,12 +389,11 @@ def _(boltz2, design_loss, features, seq_mcmc, writer):
         f"**MCMC mean pLDDT**: {float(mcmc_pred.plddt.mean()):.3f}"
     )
     pdb_viewer(mcmc_pred.st)
-    return mcmc_pred, mcmc_full_pssm
+    return (mcmc_pred,)
 
 
-# Cell 16: Export
 @app.cell
-def _(designed_pred, designed_sequence, mcmc_pred, seq_mcmc, design_loss):
+def _(design_loss, designed_pred, designed_sequence, mcmc_pred, seq_mcmc):
     mcmc_sequence = "".join(
         [TOKENS[int(i)] for i in design_loss.sequence(jax.nn.one_hot(seq_mcmc, 20)).argmax(-1)]
     )
@@ -412,7 +415,6 @@ def _(designed_pred, designed_sequence, mcmc_pred, seq_mcmc, design_loss):
     return (mcmc_sequence,)
 
 
-# Cell 17: Validation checks
 @app.cell
 def _(PROTEIN_SEQUENCE, designed_sequence, mcmc_sequence):
     def validate(seq, label):
@@ -435,6 +437,22 @@ def _(PROTEIN_SEQUENCE, designed_sequence, mcmc_sequence):
         validate(designed_sequence, "Continuous optimization"),
         validate(mcmc_sequence, "MCMC-refined"),
     ])
+    return
+
+
+@app.cell
+def _():
+    0
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _():
     return
 
 
