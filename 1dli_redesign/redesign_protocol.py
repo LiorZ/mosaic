@@ -362,9 +362,11 @@ def _(designed_pred, full_pssm):
 
 @app.cell
 def _(design_loss, designed_tokens):
+    # Extract only the variable positions for MCMC (design_loss expects 173, not 402)
+    variable_tokens = designed_tokens[jnp.array(design_loss.variable_positions)]
     seq_mcmc = gradient_MCMC(
         design_loss,
-        jax.device_put(designed_tokens),
+        jax.device_put(variable_tokens),
         temp=0.001,
         proposal_temp=0.00001,
         steps=50,
