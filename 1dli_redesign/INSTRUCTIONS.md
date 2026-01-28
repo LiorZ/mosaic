@@ -1,0 +1,7 @@
+I'd like to use this framework to design an enzyme that catalyzes the reaction of Glucose-1-phosphate to glucuronic acid-1-phosphate. There is already an enzyme that catalyzes the reaction of Glucose-1-UDP to glucuronic acid-1-UDP. I'd like to redesign the part of the backbone that binds to the UDP group so that it can bind to the phosphate group instead. The template i'm going to use is 1DLI.
+This enzyme is composed of two lobes, one lobe that binds NAD and the other binds the glucose-udp moiety. I'd like to keep the NAD binding lobe the same and only redesign the glucose-udp binding lobe. The glucose-udp binding lobe is composed of residues 229-402 and should be deleted and redesigned with an important caveat - CYS260 has to be kept exactly where it is as it is important to catalysis.
+
+Your task is to go over the repo, the example and the whole code and come up with a plan for a protocol to redesign this enzyme such that it would catalyze the desired reaction. Note that our hypothesis is that it is important for the glucose-1-phoshate lobe to bind the glucose-1-phosphate group (and the phosphate in particular) in an identical conformation as the glucose udp group (C5 should be exactly in the same position as in the templatem and the phosphate should be stabilized)
+
+You may find a template with the ligand already in place in the same folder as this INSTRUCTIONS.md file (1dli_g1p.pdb).
+You may use any skills you deem necessary for this task

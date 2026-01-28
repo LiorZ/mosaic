@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.16.3"
+__generated_with = "0.19.6"
 app = marimo.App(width="full")
 
 with app.setup:
@@ -28,8 +28,7 @@ with app.setup:
 
 @app.cell(hide_code=True)
 def _():
-    mo.md(
-        """
+    mo.md("""
     ---
     **Warning**
 
@@ -38,8 +37,7 @@ def _():
     3. You might have to run these optimization methods multiple times before you get a reasonable binder
     4. If you wanted to, you could certainly find better hyperparameters for these examples (for faster or better optimization)
     ---
-    """
-    )
+    """)
     return
 
 
@@ -80,7 +78,9 @@ def _(binder_length, boltz1, target_sequence):
 
 @app.cell(hide_code=True)
 def _():
-    mo.md("""First let's define a simple loss function to optimize.""")
+    mo.md("""
+    First let's define a simple loss function to optimize.
+    """)
     return
 
 
@@ -96,7 +96,9 @@ def _(boltz1, boltz_features):
 
 @app.cell(hide_code=True)
 def _():
-    mo.md("""Now we run an optimizer -- in this case an accelerated proximal gradient method -- to get an initial soluton""")
+    mo.md("""
+    Now we run an optimizer -- in this case an accelerated proximal gradient method -- to get an initial soluton
+    """)
     return
 
 
@@ -142,7 +144,9 @@ def _(PSSM, soft_output):
 
 @app.cell(hide_code=True)
 def _():
-    mo.md("""This looks pretty good (usually), but it isn't a single sequence (check out the PSSM above)! We could inverse fold the structure but instead let's try to 'sharpen' the PSSM to get to an extreme point of the probability simplex.""")
+    mo.md("""
+    This looks pretty good (usually), but it isn't a single sequence (check out the PSSM above)! We could inverse fold the structure but instead let's try to 'sharpen' the PSSM to get to an extreme point of the probability simplex.
+    """)
     return
 
 
@@ -183,7 +187,9 @@ def _(pssm_sharper, sharp_outputs):
 
 @app.cell(hide_code=True)
 def _():
-    mo.md("""Hopefully this still looks pretty good and is now a single sequence!""")
+    mo.md("""
+    Hopefully this still looks pretty good and is now a single sequence!
+    """)
     return
 
 
@@ -200,8 +206,7 @@ def _(af2, af_features, pssm_sharper):
 
 @app.cell(hide_code=True)
 def _():
-    mo.md(
-        """
+    mo.md("""
     Okay, that was fun but let's do a something a little more complicated: we'll use AlphaFold2 (instead of Boltz) to design a binder that adheres to a specified fold. [7S5B](https://www.rcsb.org/structure/7S5B) is a denovo triple-helix bundle originally designed to bind IL-7r; let's see if we can find a sequence _with the same fold_ that AF thinks will bind to our target instead.
 
     To do so we'll add two terms to our loss function:
@@ -210,8 +215,7 @@ def _():
     2. Cross-entropy between the predicted distogram of our sequence and the original 7S5B sequence
 
     We'll also show how easy it is to modify loss terms by clipping these two functionals.
-    """
-    )
+    """)
     return
 
 
@@ -237,7 +241,9 @@ def _():
 
 @app.cell(hide_code=True)
 def _():
-    mo.md("""Let's add a loss term that penalizes cysteines.""")
+    mo.md("""
+    Let's add a loss term that penalizes cysteines.
+    """)
     return
 
 
@@ -250,14 +256,12 @@ class NoCysteine(LossTerm):
 
 @app.cell(hide_code=True)
 def _():
-    mo.md(
-        """
+    mo.md("""
     Next, we'll predict the scaffold alone using AF2 (we could use the crystal structure instead but this works fine). We'll use the predicted structure in two loss terms:
 
     1. Cross entropy between the distograms for the scaffold ground truth sequence and our designed binder
     2. Inverse folding log probability of our designed binder as predicted by proteinMPNN applied to the scaffold structure
-    """
-    )
+    """)
     return
 
 
@@ -370,7 +374,9 @@ def _(af_loss, pssm_af):
 
 @app.cell
 def _():
-    mo.md("""Let's test this out by predicting the complex structure with Boltz and AF2""")
+    mo.md("""
+    Let's test this out by predicting the complex structure with Boltz and AF2
+    """)
     return
 
 
@@ -402,7 +408,9 @@ def _(af_o, pssm_sharper_af):
 
 @app.cell
 def _():
-    mo.md("""For fun (and to show how easy it is to use different optimization algorithms) let's try polishing this design using gradient-assisted MCMC""")
+    mo.md("""
+    For fun (and to show how easy it is to use different optimization algorithms) let's try polishing this design using gradient-assisted MCMC
+    """)
     return
 
 
@@ -502,7 +510,9 @@ def _(pssm_sharper_af):
 
 @app.cell(hide_code=True)
 def _():
-    mo.md("""As a final example let's try optimizing the *sum* of these loss terms; so we're calling both AF2 and Boltz1 at every iteration. In `mosaic` this is trivial.""")
+    mo.md("""
+    As a final example let's try optimizing the *sum* of these loss terms; so we're calling both AF2 and Boltz1 at every iteration. In `mosaic` this is trivial.
+    """)
     return
 
 
