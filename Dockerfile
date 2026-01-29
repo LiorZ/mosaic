@@ -2,7 +2,7 @@
 # Docker image with CUDA support for GPU-accelerated structure prediction
 
 # Use Vast.ai PyTorch base image with CUDA 12.8.1
-FROM vastai/pytorch:cuda-12.8.1-auto
+FROM vastai/pytorch:cuda-13.0.2-auto
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive

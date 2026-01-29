@@ -25,7 +25,7 @@ with app.setup:
     from mosaic.models.boltz2 import Boltz2
     from mosaic.losses.boltz2 import load_features_and_structure_writer
     from mosaic.losses.transformations import SetPositions, SoftClip
-    from mosaic.losses.protein_mpnn import ProteinMPNNLoss, jacobi_inverse_fold
+    from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery, jacobi_inverse_fold
     from mosaic.proteinmpnn.mpnn import load_mpnn
     from mosaic.common import TOKENS
     from mosaic.notebook_utils import pdb_viewer
@@ -45,7 +45,7 @@ def _():
     model = st[0]
 
     mo.md(f"**Loaded structure**: {pdb_path.name}")
-    return PROTEIN_SEQUENCE, pdb_path, st, model
+    return PROTEIN_SEQUENCE, model, pdb_path
 
 
 @app.cell
@@ -132,18 +132,24 @@ def _(PROTEIN_SEQUENCE, ca_coords, nad_coords):
         f"*NAD lobe backbone is fixed during Boltz2 optimization. MPNN designs sequences for the fixed backbone.*"
     )
     return (
-        min_dist_to_nad,
         NAD_DISTANCE_THRESHOLD,
         boltz_designable_mask,
-        mpnn_designable_mask,
         designable_in_nad_lobe,
-        wildtype_with_x,
+        min_dist_to_nad,
+        mpnn_designable_mask,
         n_boltz_variable,
+        wildtype_with_x,
     )
 
 
 @app.cell
-def _(boltz_designable_mask, mpnn_designable_mask, min_dist_to_nad, NAD_DISTANCE_THRESHOLD, designable_in_nad_lobe):
+def _(
+    NAD_DISTANCE_THRESHOLD,
+    boltz_designable_mask,
+    designable_in_nad_lobe,
+    min_dist_to_nad,
+    mpnn_designable_mask,
+):
     """Cell 4: Visualize designable regions."""
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
@@ -303,7 +309,7 @@ def _(PROTEIN_SEQUENCE, boltz2, features):
         f"**Wildtype mean pLDDT**: {float(wt_plddt[:402].mean()):.3f}  \n"
         f"**Distogram shape**: {wt_distogram_probs.shape}"
     )
-    return wt_distogram_probs, wt_output
+    return (wt_distogram_probs,)
 
 
 @app.cell
@@ -316,14 +322,16 @@ def _(
     wildtype_with_x,
     wt_distogram_probs,
 ):
-    """Cell 10: Define composite loss with ProteinMPNNLoss.
+    """Cell 10: Define composite loss with InverseFoldingSequenceRecovery.
 
     The loss combines:
     1. Structure prediction losses (pLDDT, contacts, PAE, distogram)
-    2. ProteinMPNNLoss: evaluates if MPNN agrees the sequence fits the structure
+    2. InverseFoldingSequenceRecovery: pushes sequence toward what MPNN would sample
 
-    With stop_grad=False, gradients flow through Boltz2's structure prediction,
-    creating a self-consistency loop where both models must agree.
+    This term samples sequences from MPNN and computes the inner product with
+    the current soft sequence, effectively guiding optimization toward
+    MPNN-preferred solutions. Empirically speeds up design and increases
+    filter pass rates.
     """
     nad_idx_arr = np.array(nad_idx)
     g1p_idx_arr = np.array(g1p_idx)
@@ -356,13 +364,9 @@ def _(
             sp.DistogramCE(wt_distogram_probs, name="scaffold_CE"),
             2.5, 3.0,
         )
-        # ProteinMPNN inverse folding loss
-        # "Does MPNN think this sequence is compatible with the predicted structure?"
-        + 1.0 * ProteinMPNNLoss(
-            mpnn=mpnn,
-            num_samples=4,
-            stop_grad=False,  # Gradients flow through structure
-        )
+        # ProteinMPNN sequence recovery loss
+        # Pushes sequence toward what MPNN would sample for the predicted structure
+        + 5.0 * InverseFoldingSequenceRecovery(mpnn, temp=jnp.array(0.01))
     )
 
     boltz_loss = boltz2.build_loss(
@@ -386,7 +390,7 @@ def _(
         "| BinderTargetContact (G1P) | 2.0 | G1P lobe ↔ G1P |\n"
         "| PAE losses | 0.1 | Interface accuracy |\n"
         "| DistogramCE | 2.0 | Scaffold preservation |\n"
-        "| **ProteinMPNNLoss** | 1.0 | **Inverse folding consistency** |"
+        "| **InverseFoldingSequenceRecovery** | 5.0 | **Guides toward MPNN-preferred sequences** |"
     )
 
     jax.clear_caches()
@@ -409,7 +413,7 @@ def _(design_loss, n_boltz_variable):
         n_steps=100,
         stepsize=0.1,
         momentum=0.0,
-        serial_evaluation=True,
+        serial_evaluation=False,
     )
     return (PSSM_soft,)
 
@@ -423,7 +427,7 @@ def _(PSSM_soft, design_loss):
         x=PSSM_soft,
         stepsize=0.2,
         scale=1.1,
-        serial_evaluation=True,
+        serial_evaluation=False,
     )
     PSSM_sharp, _ = simplex_APGM(
         loss_function=design_loss,
@@ -431,7 +435,7 @@ def _(PSSM_soft, design_loss):
         x=PSSM_sharp,
         stepsize=0.2,
         scale=1.5,
-        serial_evaluation=True,
+        serial_evaluation=False,
     )
     return (PSSM_sharp,)
 
@@ -459,11 +463,18 @@ def _(PSSM_sharp, boltz2, design_loss, features, writer):
         f"**Designed sequence**:\n\n`{designed_sequence_phase1}`"
     )
     pdb_viewer(phase1_pred.st)
-    return full_pssm_phase1, designed_sequence_phase1, phase1_pred
+    return designed_sequence_phase1, full_pssm_phase1, phase1_pred
 
 
 @app.cell
-def _(PROTEIN_SEQUENCE, full_pssm_phase1, boltz2, features, mpnn, mpnn_designable_mask):
+def _(
+    PROTEIN_SEQUENCE,
+    boltz2,
+    features,
+    full_pssm_phase1,
+    mpnn,
+    mpnn_designable_mask,
+):
     """Cell 14: Phase 2 — Diverse sequence sampling with ProteinMPNN.
 
     Use the Boltz2-predicted structure from Phase 1 as the backbone for MPNN sampling.
@@ -508,11 +519,18 @@ def _(PROTEIN_SEQUENCE, full_pssm_phase1, boltz2, features, mpnn, mpnn_designabl
         diverse_sequences.append(seq_str)
 
     mo.md(f"**Generated {n_samples} diverse sequences using ProteinMPNN**")
-    return phase1_output, fixed_position_bias, diverse_sequences
+    return (diverse_sequences,)
 
 
 @app.cell
-def _(PROTEIN_SEQUENCE, boltz2, diverse_sequences, features, mpnn_designable_mask, writer):
+def _(
+    PROTEIN_SEQUENCE,
+    boltz2,
+    diverse_sequences,
+    features,
+    mpnn_designable_mask,
+    writer,
+):
     """Cell 15: Validate diverse sequences with Boltz2."""
     mo.md("### Phase 3: Validation of Diverse Sequences")
 
@@ -585,7 +603,7 @@ def _(PROTEIN_SEQUENCE, designed_sequence_phase1, phase1_pred, validations):
         "Phase 1": pdb_viewer(phase1_pred.st),
         "Best Phase 2": pdb_viewer(best_phase2['structure']),
     })
-    return (best_phase2,)
+    return
 
 
 @app.cell
@@ -643,7 +661,12 @@ def _(designed_sequence_phase1, phase1_pred, validations):
 
 
 @app.cell
-def _(PROTEIN_SEQUENCE, designed_sequence_phase1, mpnn_designable_mask, validations):
+def _(
+    PROTEIN_SEQUENCE,
+    designed_sequence_phase1,
+    mpnn_designable_mask,
+    validations,
+):
     """Cell 18: Final validation checks."""
     def validate_sequence(seq, label):
         # NAD lobe fixed positions unchanged
