@@ -199,10 +199,10 @@ def _(pdb_path):
     # Extract chain A only for the template
     template_st = gemmi.Structure()
     template_model = gemmi.Model("0")
-    chain_a = st_template[0].find_chain("A")
+    template_chain_a = st_template[0].find_chain("A")
 
     new_chain = gemmi.Chain("A")
-    for res in chain_a:
+    for res in template_chain_a:
         new_chain.add_residue(res)
 
     ent = gemmi.Entity("A")
@@ -483,18 +483,18 @@ def _(PROTEIN_SEQUENCE, full_pssm_phase1, boltz2, features, mpnn, mpnn_designabl
     # Build bias to fix non-designable positions
     # Bias is -1e6 for non-wildtype amino acids at fixed positions
     fixed_position_bias = jnp.zeros((402, 20))
-    for i in range(402):
-        if not mpnn_designable_mask[i]:
-            wt_idx = TOKENS.index(PROTEIN_SEQUENCE[i])
+    for pos_idx in range(402):
+        if not mpnn_designable_mask[pos_idx]:
+            wt_idx = TOKENS.index(PROTEIN_SEQUENCE[pos_idx])
             bias_row = jnp.full(20, -1e6)
             bias_row = bias_row.at[wt_idx].set(0.0)
-            fixed_position_bias = fixed_position_bias.at[i].set(bias_row)
+            fixed_position_bias = fixed_position_bias.at[pos_idx].set(bias_row)
 
     # Sample diverse sequences
     n_samples = 8
     diverse_sequences = []
-    for i in range(n_samples):
-        key_i = jax.random.key(i * 1000)
+    for sample_idx in range(n_samples):
+        key_i = jax.random.key(sample_idx * 1000)
         seq_tokens = jacobi_inverse_fold(
             mpnn=mpnn,
             binder_length=402,
@@ -517,7 +517,7 @@ def _(PROTEIN_SEQUENCE, boltz2, diverse_sequences, features, mpnn_designable_mas
     mo.md("### Phase 3: Validation of Diverse Sequences")
 
     validations = []
-    for i, seq in enumerate(diverse_sequences):
+    for val_idx, seq in enumerate(diverse_sequences):
         # Convert to PSSM
         pssm = jax.nn.one_hot(
             jnp.array([TOKENS.index(aa) for aa in seq]), 20
@@ -528,7 +528,7 @@ def _(PROTEIN_SEQUENCE, boltz2, diverse_sequences, features, mpnn_designable_mas
             features=features,
             writer=writer,
             recycling_steps=3,
-            key=jax.random.key(200 + i),
+            key=jax.random.key(200 + val_idx),
         )
 
         # Count mutations
@@ -540,7 +540,7 @@ def _(PROTEIN_SEQUENCE, boltz2, diverse_sequences, features, mpnn_designable_mas
         fixed_ok = all(seq[j] == PROTEIN_SEQUENCE[j] for j in range(402) if not mpnn_designable_mask[j])
 
         validations.append({
-            'index': i + 1,
+            'index': val_idx + 1,
             'sequence': seq,
             'plddt': float(pred.plddt.mean()),
             'iptm': float(pred.iptm),
@@ -554,8 +554,8 @@ def _(PROTEIN_SEQUENCE, boltz2, diverse_sequences, features, mpnn_designable_mas
     # Display summary table
     summary_md = "| Design | pLDDT | iPTM | G1P mut | NAD mut | CYS260 | Fixed OK |\n"
     summary_md += "|--------|-------|------|---------|---------|--------|----------|\n"
-    for v in validations:
-        summary_md += f"| {v['index']} | {v['plddt']:.3f} | {v['iptm']:.3f} | {v['mutations_g1p']} | {v['mutations_nad']} | {'OK' if v['cys260_ok'] else 'X'} | {'OK' if v['fixed_ok'] else 'X'} |\n"
+    for val_entry in validations:
+        summary_md += f"| {val_entry['index']} | {val_entry['plddt']:.3f} | {val_entry['iptm']:.3f} | {val_entry['mutations_g1p']} | {val_entry['mutations_nad']} | {'OK' if val_entry['cys260_ok'] else 'X'} | {'OK' if val_entry['fixed_ok'] else 'X'} |\n"
 
     mo.md(summary_md)
     return (validations,)
@@ -590,32 +590,54 @@ def _(PROTEIN_SEQUENCE, designed_sequence_phase1, phase1_pred, validations):
 
 @app.cell
 def _(designed_sequence_phase1, phase1_pred, validations):
-    """Cell 17: Export results."""
+    """Cell 17: Export results to disk and provide download buttons."""
+    # Create output directory
+    output_dir = Path(__file__).parent / "output_hybrid"
+    output_dir.mkdir(exist_ok=True)
+
     # Build FASTA content
     fasta_lines = [
         f">Phase1_Boltz2_MPNN_optimized",
         designed_sequence_phase1,
     ]
-    for v in validations:
-        fasta_lines.append(f">Phase2_MPNN_design_{v['index']}_pLDDT_{v['plddt']:.3f}")
-        fasta_lines.append(v['sequence'])
+    for fasta_val in validations:
+        fasta_lines.append(f">Phase2_MPNN_design_{fasta_val['index']}_pLDDT_{fasta_val['plddt']:.3f}")
+        fasta_lines.append(fasta_val['sequence'])
 
     fasta_content = "\n".join(fasta_lines)
 
-    mo.vstack([
-        mo.md("### Export"),
-        mo.hstack([
-            mo.download(
-                fasta_content,
-                filename="designed_sequences.fasta",
-                label="Download FASTA (all)",
-            ),
-            mo.download(
-                phase1_pred.st.make_pdb_string(),
-                filename="phase1_optimized.pdb",
-                label="Download Phase 1 PDB",
-            ),
-        ]),
+    # Save FASTA to disk
+    fasta_path = output_dir / "designed_sequences.fasta"
+    fasta_path.write_text(fasta_content)
+
+    # Save Phase 1 PDB to disk
+    phase1_pdb_path = output_dir / "phase1_optimized.pdb"
+    phase1_pdb_path.write_text(phase1_pred.st.make_pdb_string())
+
+    # Save all Phase 2 PDBs to disk
+    for save_val in validations:
+        phase2_pdb_path = output_dir / f"phase2_design_{save_val['index']}_pLDDT_{save_val['plddt']:.3f}.pdb"
+        phase2_pdb_path.write_text(save_val['structure'].make_pdb_string())
+
+    saved_files = list(output_dir.glob("*.pdb")) + list(output_dir.glob("*.fasta"))
+    mo.md(
+        f"### Export\n\n"
+        f"**Saved {len(saved_files)} files to `{output_dir}/`**:\n"
+        + "\n".join(f"- `{f.name}`" for f in sorted(saved_files))
+    )
+
+    # Also provide download buttons for interactive use
+    mo.hstack([
+        mo.download(
+            fasta_content,
+            filename="designed_sequences.fasta",
+            label="Download FASTA (all)",
+        ),
+        mo.download(
+            phase1_pred.st.make_pdb_string(),
+            filename="phase1_optimized.pdb",
+            label="Download Phase 1 PDB",
+        ),
     ])
     return
 
@@ -647,8 +669,8 @@ def _(PROTEIN_SEQUENCE, designed_sequence_phase1, mpnn_designable_mask, validati
         }
 
     checks = [validate_sequence(designed_sequence_phase1, "Phase 1 (Boltz2 + MPNN)")]
-    for v in validations:
-        checks.append(validate_sequence(v['sequence'], f"Phase 2 Design {v['index']}"))
+    for check_val in validations:
+        checks.append(validate_sequence(check_val['sequence'], f"Phase 2 Design {check_val['index']}"))
 
     # Display
     md_output = "### Validation Summary\n\n"
