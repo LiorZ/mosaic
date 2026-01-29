@@ -9,19 +9,8 @@ with app.setup:
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.8"
     os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
-    # Disable GPU graph capture to avoid "Failed to capture gpu graph" errors
-    os.environ["XLA_FLAGS"] = (
-        "--xla_gpu_enable_command_buffer=false "
-        "--xla_gpu_graph_level=0 "
-        "--xla_gpu_enable_triton_gemm=false"
-    )
-    # Also disable persistent cache which can cause issues
-    os.environ["JAX_ENABLE_X64"] = "false"
-    os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 
     import jax
-    # Disable compilation cache
-    jax.config.update("jax_compilation_cache_dir", None)
     jax.config.update("jax_default_matmul_precision", "bfloat16")
     import jax.numpy as jnp
     import marimo as mo
