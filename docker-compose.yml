@@ -1,0 +1,105 @@
+version: "3.9"
+
+services:
+  mosaic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mosaic:latest
+    container_name: mosaic
+
+    # GPU support - requires nvidia-container-toolkit
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Port mapping for marimo notebook server
+    ports:
+      - "2718:2718"
+
+    # Mount volumes for persistent data
+    volumes:
+      # Model weights (download once, persist across runs)
+      - boltz-cache:/root/.boltz
+      - huggingface-cache:/root/.cache/huggingface
+      - torch-cache:/root/.cache/torch
+      # Working data directory
+      - ./data:/app/data
+      # Mount examples for easy access
+      - ./examples:/app/examples:ro
+      # Mount 1dli_redesign for the enzyme redesign protocol
+      - ./1dli_redesign:/app/1dli_redesign
+
+    # Environment variables
+    environment:
+      - XLA_PYTHON_CLIENT_PREALLOCATE=false
+      - XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
+      - TF_GPU_ALLOCATOR=cuda_malloc_async
+      - JAX_PLATFORMS=cuda
+      # Uncomment to use specific GPU(s)
+      # - CUDA_VISIBLE_DEVICES=0
+
+    # Keep container running for interactive use
+    stdin_open: true
+    tty: true
+
+    # Resource limits (optional, adjust as needed)
+    # shm_size: "16gb"  # Shared memory for data loading
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2718/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Alternative service for running scripts directly
+  mosaic-script:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mosaic:latest
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    volumes:
+      - boltz-cache:/root/.boltz
+      - huggingface-cache:/root/.cache/huggingface
+      - torch-cache:/root/.cache/torch
+      - ./data:/app/data
+      - ./examples:/app/examples
+      - ./1dli_redesign:/app/1dli_redesign
+
+    environment:
+      - XLA_PYTHON_CLIENT_PREALLOCATE=false
+      - XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
+      - TF_GPU_ALLOCATOR=cuda_malloc_async
+      - JAX_PLATFORMS=cuda
+
+    # Override command to run a specific script
+    # Usage: docker-compose run mosaic-script python examples/example_notebook.py
+    entrypoint: ["python"]
+    command: ["--help"]
+
+    profiles:
+      - script
+
+# Named volumes for model weight persistence
+volumes:
+  boltz-cache:
+    name: mosaic-boltz-cache
+  huggingface-cache:
+    name: mosaic-huggingface-cache
+  torch-cache:
+    name: mosaic-torch-cache
