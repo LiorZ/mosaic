@@ -9,6 +9,8 @@ with app.setup:
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.8"
     os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
+    # Disable GPU graph capture to avoid "Failed to capture gpu graph" errors
+    os.environ["XLA_FLAGS"] = "--xla_gpu_enable_command_buffer=false"
 
     import jax
     jax.config.update("jax_default_matmul_precision", "bfloat16")
