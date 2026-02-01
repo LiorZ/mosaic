@@ -33,18 +33,42 @@ with app.setup:
 
 @app.cell
 def _():
-    """Cell 1: Define protein sequence and load structure for NAD distance calculation."""
-    PROTEIN_SEQUENCE = (
-        "MKIAVAGSGYVGLSLGVLLSLQNEVTIVDILPSKVDKINNGLSPIQDEYIEYYLKSKQLSIKATLDSKAAYKEAELVIIATPTNYNSRINYFDTQHVETVIKEVLSVNSHATLIIKSTIPIGFITEMRQKFQTDRIIFSPEFLRESKALYDNLYPSRIIVSCEENDSPKVKADAEKFALLLKSAAKKNNVPVLIMGASEAEAVKLFANTYLALRVAYFNELDTYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    )
+    """Cell 1: Define protein sequence and load structure for NAD distance calculation.
+
+    The G1P lobe (residues 228-402) starts with a RANDOM sequence, except for
+    CYS260 which is fixed. This allows unbiased exploration of sequence space
+    while the DistogramCE loss conditions the fold topology.
+    """
+    # NAD lobe sequence (residues 1-228) - fixed from original 1dli
+    NAD_LOBE_SEQUENCE = "MKIAVAGSGYVGLSLGVLLSLQNEVTIVDILPSKVDKINNGLSPIQDEYIEYYLKSKQLSIKATLDSKAAYKEAELVIIATPTNYNSRINYFDTQHVETVIKEVLSVNSHATLIIKSTIPIGFITEMRQKFQTDRIIFSPEFLRESKALYDNLYPSRIIVSCEENDSPKVKADAEKFALLLKSAAKKNNVPVLIMGASEAEAVKLFANTYLALRVAYFNELDTY"
+    assert len(NAD_LOBE_SEQUENCE) == 228
+
+    # Generate random sequence for G1P lobe (residues 229-402)
+    # Exclude cysteine from random sampling to avoid unwanted disulfides
+    DESIGNABLE_AA = "ADEFGHIKLMNPQRSTVWY"  # 19 AAs, no C
+    np.random.seed(42)  # For reproducibility; change seed for different runs
+    g1p_lobe_random = list(np.random.choice(list(DESIGNABLE_AA), size=174))
+
+    # Fix CYS260 (index 259, position 31 in G1P lobe = index 31)
+    g1p_lobe_random[31] = "C"  # Position 259 in full sequence = 259 - 228 = 31
+
+    G1P_LOBE_SEQUENCE = "".join(g1p_lobe_random)
+    assert len(G1P_LOBE_SEQUENCE) == 174
+
+    PROTEIN_SEQUENCE = NAD_LOBE_SEQUENCE + G1P_LOBE_SEQUENCE
     assert len(PROTEIN_SEQUENCE) == 402
+    assert PROTEIN_SEQUENCE[259] == "C", "CYS260 must be preserved"
 
     # Load structure to compute NAD distances
     pdb_path = Path(__file__).parent / "1dli_g1p.pdb"
     st = gemmi.read_structure(str(pdb_path))
     model = st[0]
 
-    mo.md(f"**Loaded structure**: {pdb_path.name}")
+    mo.md(
+        f"**Loaded structure**: {pdb_path.name}\n\n"
+        f"**G1P lobe starting sequence**: Random (seed=42), CYS260 fixed\n\n"
+        f"`{G1P_LOBE_SEQUENCE[:40]}...`"
+    )
     return PROTEIN_SEQUENCE, model, pdb_path
 
 
@@ -289,27 +313,69 @@ def _(features):
 
 
 @app.cell
-def _(PROTEIN_SEQUENCE, boltz2, features):
-    """Cell 9: Get wildtype distogram for scaffold preservation."""
-    wt_pssm = jax.nn.one_hot(
-        jnp.array([TOKENS.index(aa) for aa in PROTEIN_SEQUENCE]), 20
+def _(ca_coords):
+    """Cell 9: Compute reference distogram from template PDB structure.
+
+    Instead of using a Boltz2 prediction, we compute the distogram directly
+    from the experimental 1dli structure's CA-CA distances. This conditions
+    the optimization to maintain the original fold topology regardless of
+    the starting sequence.
+
+    Boltz2 distogram bins: 64 bins from 2.3125Å to 21.6875Å (width 0.3125Å)
+    """
+    # Boltz2 distogram parameters
+    DIST_MIN = 2.3125
+    DIST_MAX = 21.6875
+    NUM_BINS = 64
+    BIN_WIDTH = (DIST_MAX - DIST_MIN) / NUM_BINS  # 0.3125Å
+
+    # Compute CA-CA distance matrix from template structure
+    n_res = len(ca_coords)
+    ca_dist_matrix = np.zeros((n_res, n_res))
+    for i in range(n_res):
+        for j in range(n_res):
+            if not (np.isnan(ca_coords[i]).any() or np.isnan(ca_coords[j]).any()):
+                ca_dist_matrix[i, j] = np.linalg.norm(ca_coords[i] - ca_coords[j])
+            else:
+                ca_dist_matrix[i, j] = np.nan
+
+    # Convert distances to bin indices
+    # Distances below DIST_MIN go to bin 0, above DIST_MAX go to last bin
+    bin_indices = np.clip(
+        ((ca_dist_matrix - DIST_MIN) / BIN_WIDTH).astype(int),
+        0, NUM_BINS - 1
     )
 
-    wt_output = boltz2.model_output(
-        PSSM=wt_pssm,
-        features=features,
-        recycling_steps=3,
-        key=jax.random.key(42),
-    )
+    # Create one-hot distogram (sharp target from experimental structure)
+    template_distogram = np.zeros((n_res, n_res, NUM_BINS))
+    for i in range(n_res):
+        for j in range(n_res):
+            if not np.isnan(ca_dist_matrix[i, j]):
+                template_distogram[i, j, bin_indices[i, j]] = 1.0
+            else:
+                # For missing coordinates, use uniform distribution
+                template_distogram[i, j, :] = 1.0 / NUM_BINS
 
-    wt_distogram_probs = jax.nn.softmax(wt_output.distogram_logits)[:402, :402]
-    wt_plddt = wt_output.plddt
+    # Convert to JAX array
+    template_distogram_probs = jnp.array(template_distogram)
+
+    # Compute some statistics for display
+    mean_dist = np.nanmean(ca_dist_matrix)
+    intra_nad_mean = np.nanmean(ca_dist_matrix[:228, :228])
+    intra_g1p_mean = np.nanmean(ca_dist_matrix[228:, 228:])
+    inter_lobe_mean = np.nanmean(ca_dist_matrix[:228, 228:])
 
     mo.md(
-        f"**Wildtype mean pLDDT**: {float(wt_plddt[:402].mean()):.3f}  \n"
-        f"**Distogram shape**: {wt_distogram_probs.shape}"
+        f"### Template-based Fold Conditioning\n\n"
+        f"**Distogram computed from**: 1dli experimental structure CA coordinates\n\n"
+        f"**Distogram shape**: {template_distogram_probs.shape}\n\n"
+        f"**Mean CA-CA distances**:\n"
+        f"- Overall: {mean_dist:.1f}Å\n"
+        f"- Within NAD lobe: {intra_nad_mean:.1f}Å\n"
+        f"- Within G1P lobe: {intra_g1p_mean:.1f}Å\n"
+        f"- Between lobes: {inter_lobe_mean:.1f}Å"
     )
-    return (wt_distogram_probs,)
+    return (template_distogram_probs,)
 
 
 @app.cell
@@ -320,7 +386,7 @@ def _(
     mpnn,
     nad_idx,
     wildtype_with_x,
-    wt_distogram_probs,
+    template_distogram_probs,
 ):
     """Cell 10: Define composite loss with InverseFoldingSequenceRecovery.
 
@@ -328,10 +394,8 @@ def _(
     1. Structure prediction losses (pLDDT, contacts, PAE, distogram)
     2. InverseFoldingSequenceRecovery: pushes sequence toward what MPNN would sample
 
-    This term samples sequences from MPNN and computes the inner product with
-    the current soft sequence, effectively guiding optimization toward
-    MPNN-preferred solutions. Empirically speeds up design and increases
-    filter pass rates.
+    The DistogramCE now uses the template structure's CA-CA distances, conditioning
+    the fold to match the original 1dli topology regardless of starting sequence.
     """
     nad_idx_arr = np.array(nad_idx)
     g1p_idx_arr = np.array(g1p_idx)
@@ -359,9 +423,10 @@ def _(
         # Interface PAE
         + 0.1 * sp.BinderTargetPAE()
         + 0.1 * sp.TargetBinderPAE()
-        # Scaffold adherence via distogram cross-entropy
+        # Fold topology conditioning via distogram cross-entropy
+        # Uses experimental 1dli CA-CA distances as target
         + 2.0 * SoftClip(
-            sp.DistogramCE(wt_distogram_probs, name="scaffold_CE"),
+            sp.DistogramCE(template_distogram_probs, name="fold_topology_CE"),
             2.5, 3.0,
         )
         # ProteinMPNN sequence recovery loss
@@ -389,8 +454,8 @@ def _(
         "| BinderTargetContact (NAD) | 1.0 | NAD lobe ↔ NAD |\n"
         "| BinderTargetContact (G1P) | 2.0 | G1P lobe ↔ G1P |\n"
         "| PAE losses | 0.1 | Interface accuracy |\n"
-        "| DistogramCE | 2.0 | Scaffold preservation |\n"
-        "| **InverseFoldingSequenceRecovery** | 5.0 | **Guides toward MPNN-preferred sequences** |"
+        "| **DistogramCE** | 2.0 | **Fold topology from 1dli template** |\n"
+        "| InverseFoldingSequenceRecovery | 5.0 | Guides toward MPNN-preferred sequences |"
     )
 
     jax.clear_caches()
