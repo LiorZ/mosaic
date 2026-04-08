@@ -19,7 +19,8 @@ from joltz import TrunkState
 
 
 from ..common import LinearCombination, LossTerm
-from .structure_prediction import AbstractStructureOutput
+from ..util import pairwise_distance
+from .structure_prediction import AbstractStructureOutput, predicted_tm_score
 
 
 def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
@@ -359,6 +360,8 @@ class Boltz2Output(AbstractStructureOutput):
 
     @property
     def backbone_coordinates(self) -> Float[Array, "N 4"]:
+        # this can also be done with the atom_backbone_feat feature -- 
+        # something like index = jnp.nonzero(abf[..., 1:5].any(axis=-1), size=4*N).reshape(N,4)
         features = jax.tree.map(lambda x: x[0], self.features)
         # In order these are N, C-alpha, C, O
         assert ref_atoms["UNK"][:4] == ["N", "CA", "C", "O"]
@@ -574,5 +577,5 @@ class MultiSampleBoltz2Loss(LossTerm):
         vs, auxs = jax.vmap(apply_loss_to_single_sample)(
             jax.random.split(key, self.num_samples)
         )
-
-        return self.reduction(vs), jax.tree.map(lambda v: list(jnp.sort(v)), auxs)
+        sortperm = jnp.argsort(vs)
+        return self.reduction(vs), jax.tree.map(lambda v: list(v[sortperm]), auxs)
